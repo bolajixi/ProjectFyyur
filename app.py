@@ -4,9 +4,9 @@
 
 import logging
 import os
-import sys
 from audioop import add
 from datetime import datetime
+from distutils.command.clean import clean
 from logging import FileHandler, Formatter
 from operator import itemgetter
 
@@ -18,6 +18,7 @@ from flask_migrate import Migrate
 from flask_moment import Moment
 from flask_sqlalchemy import SQLAlchemy
 from flask_wtf import Form
+from sqlalchemy.orm import defer, undefer
 
 from forms import *
 from models import *
@@ -46,7 +47,7 @@ def format_datetime(value, format='medium'):
   return babel.dates.format_datetime(date, format, locale='en')
 
 app.jinja_env.filters['datetime'] = format_datetime
-now = datetime.now()
+current_time = datetime.now()
 
 #----------------------------------------------------------------------------#
 # Controllers.
@@ -81,7 +82,7 @@ def venues():
         venue_shows = Show.query.filter_by(venue_id=venue.id).all()
 
         for show in venue_shows:
-          if show.start_time > now:
+          if show.start_time > current_time:
             num_upcoming_shows += 1
 
         venue_list.append({
@@ -102,25 +103,24 @@ def venues():
 def search_venues():
   search_term = request.form.get('search_term', '').strip()
 
-  venues = Venue.query.filter(Venue.name.ilike(f'%{search_term}%')).all()
   data = []
+  venue_search_query = filter_term(search_field=Venue.name, search_term=search_term)
+  matching_venues = Venue.query.filter(venue_search_query).all()
 
-  for venue in venues:
+  for venue in matching_venues:
     num_upcoming_shows = 0
-    shows = Show.query.filter_by(venue_id=venue.id).all()
 
-    for show in shows:
-      if show.start_time > now:
-        num_upcoming_shows += 1
+    for show in venue.shows:
+      if show.start_time > current_time: num_upcoming_shows += 1
 
     data.append({"id": venue.id, "name": venue.name, "num_upcoming_shows": num_upcoming_shows})
 
   response = {
-    "count": len(venues),
+    "count": len(matching_venues),
     "data": data
   }
 
-  return render_template('pages/search_venues.html', results=response, search_term=search_term)
+  return render_template('pages/search_venues.html', results=response, search_term=request.form.get('search_term', ''))
 
 @app.route('/venues/<int:venue_id>')
 def show_venue(venue_id):
@@ -167,28 +167,29 @@ def create_venue_form():
 def create_venue_submission(): 
   form = VenueForm()
 
-  name = form.name.data.strip()
-  city = form.city.data.strip()
+  name = form.name.data
+  city = form.city.data
   state = form.state.data
   phone = form.phone.data
-  address = form.address.data.strip()
+  address = form.address.data
   genres = form.genres.data
   seeking_talent = form.seeking_talent.data
-  seeking_description = form.seeking_description.data.strip()
-  image_link = form.image_link.data.strip()
-  website = form.website_link.data.strip()
-  facebook_link = form.facebook_link.data.strip()
+  seeking_description = form.seeking_description.data
+  image_link = form.image_link.data
+  website = form.website_link.data
+  facebook_link = form.facebook_link.data
 
   try:
     venue = Venue(name=name, city=city, state=state, address=address, phone=phone, 
     seeking_talent=seeking_talent, seeking_description=seeking_description, 
     image_link=image_link, website=website, facebook_link=facebook_link)
     
-    for genre in genres:
-        existing_genre = Genre.query.filter_by(name=genre).one_or_none()
+    existing_genres= { genre.name: genre for genre in Genre.query.all() }
 
-        if existing_genre:
-            venue.genres.append(existing_genre)
+    # Get genre if exist or create a new genre entry
+    for genre in genres:
+        if genre in existing_genres:
+            venue.genres.append(existing_genres[genre])
         else:
             new_genre = Genre(name=genre)
             db.session.add(new_genre)
@@ -201,13 +202,13 @@ def create_venue_submission():
     print(e)
     flash(f"An error occurred. Venue '{request.form['name']}' could not be listed.")
     db.session.rollback()
-    print(sys.exc_info())
   finally:
     db.session.close()
   return render_template('pages/home.html')
 
 @app.route('/venues/<venue_id>', methods=['DELETE'])
 def delete_venue(venue_id):
+  print(venue_id)
   venue = Venue.query.get(venue_id)
 
   if not venue:
@@ -228,14 +229,9 @@ def delete_venue(venue_id):
 #  ----------------------------------------------------------------
 @app.route('/artists')
 def artists():
-  data = []
-  artists = Artist.query.order_by(Artist.name).all()
 
-  for artist in artists:
-    data.append({
-        "id": artist.id,
-        "name": artist.name
-    })
+  data = db.session.query(Artist).options(defer("*"), undefer("id"), undefer("name")).all()
+
   return render_template('pages/artists.html', artists=data)
 
 @app.route('/artists/search', methods=['POST'])
@@ -243,23 +239,19 @@ def search_artists():
   search_term = request.form.get('search_term', '').strip()
 
   data = []
-  artists = Artist.query.filter(Artist.name.ilike(f'%{search_term}%')).all()
+  artist_search_query = filter_term(search_field=Artist.name, search_term=search_term)
+  matching_artists = Artist.query.filter(artist_search_query).all()
 
-  for artist in artists:
-    artist_shows = Show.query.filter_by(artist_id=artist.id).all()
+  for artist in matching_artists:
     num_upcoming_shows = 0
 
-    for show in artist_shows:
-      if show.start_time > now:
-        num_upcoming_shows += 1
+    for show in artist.shows:
+      if show.start_time > current_time: num_upcoming_shows += 1
 
-    data.append({
-      "id": artist.id,
-      "name": artist.name,
-      "num_upcoming_shows": num_upcoming_shows
-    })
+    data.append({"id": artist.id, "name": artist.name, "num_upcoming_shows": num_upcoming_shows})
+
   response={
-    "count": len(artists),
+    "count": len(matching_artists),
     "data": data
   }
   return render_template('pages/search_artists.html', results=response, search_term=request.form.get('search_term', ''))
@@ -455,6 +447,7 @@ def create_artist_form():
 @app.route('/artists/create', methods=['POST'])
 def create_artist_submission():
   form = ArtistForm()
+  clean_data = form_data_cleanser(form)
 
   name = form.name.data.strip()
   city = form.city.data.strip()
@@ -474,11 +467,12 @@ def create_artist_submission():
                     seeking_venue=seeking_venue,
                     seeking_description=seeking_description)
 
-    for genre in genres:
-      existing_genre = Genre.query.filter_by(name=genre).one_or_none()
+    existing_genres= { genre.name: genre for genre in Genre.query.all() }
 
-      if existing_genre:
-          artist.genres.append(existing_genre)
+    # Get genre if exist or create a new genre entry
+    for genre in genres:
+      if genre in existing_genres:
+          artist.genres.append(existing_genres[genre])
       else:
           new_genre = Genre(name=genre)
           db.session.add(new_genre)
@@ -490,7 +484,6 @@ def create_artist_submission():
   except:
     flash(f"An error occurred. Artist '{request.form['name']}' could not be listed.")
     db.session.rollback()
-    print(sys.exc_info())
   finally:
     db.session.close()
 
@@ -512,7 +505,7 @@ def shows():
       "artist_id": show.artist_id,
       "artist_name": Artist.query.filter_by(id=show.artist_id).first().name,
       "artist_image_link": Artist.query.filter_by(id=show.artist_id).first().image_link,
-      "start_time": str(show.start_time)
+      "start_time": format_datetime(str(show.start_time))
     })
   return render_template('pages/shows.html', shows=data)
 
@@ -524,11 +517,11 @@ def create_shows():
 @app.route('/shows/create', methods=['POST'])
 def create_show_submission():
   try:
-    form = ShowForm()
+    cleaned_data = form_data_cleanser(request.form)
 
-    artist_id = form.artist_id.data.strip()
-    venue_id = form.venue_id.data.strip()
-    start_time = form.start_time.data
+    artist_id = cleaned_data['artist_id']
+    venue_id = cleaned_data['venue_id']
+    start_time = cleaned_data['start_time']
 
     show = Show(artist_id=artist_id, venue_id=venue_id, start_time=start_time)
 
@@ -539,7 +532,6 @@ def create_show_submission():
   except:
     flash('An error occurred. Show was unable to be created!')
     db.session.rollback()
-    print(sys.exc_info())
   finally:
     db.session.close()
 
@@ -569,7 +561,7 @@ if not app.debug:
 def venue_past_shows(shows):
   past_shows = []
   for show in shows:
-    if show.start_time <= now:
+    if show.start_time <= current_time:
       past_shows.append({
         "artist_id": show.artist_id,
         "artist_name": Artist.query.get(show.artist_id).name,
@@ -582,7 +574,7 @@ def venue_past_shows(shows):
 def venue_upcoming_shows(shows):
   upcoming_shows = []
   for show in shows:
-    if show.start_time > now:
+    if show.start_time > current_time:
       upcoming_shows.append({
         "artist_id": show.artist_id,
         "artist_name": Artist.query.get(show.artist_id).name,
@@ -594,7 +586,7 @@ def venue_upcoming_shows(shows):
 def artist_past_shows(shows):
   past_shows = []
   for show in shows:
-    if show.start_time <= now:
+    if show.start_time <= current_time:
       past_shows.append({
         'venue_id' : show.venue_id,
         'venue_name' : Venue.query.get(show.venue_id).name,
@@ -606,7 +598,7 @@ def artist_past_shows(shows):
 def artist_upcoming_shows(shows):
   upcoming_shows = []
   for show in shows:
-    if show.start_time > now:
+    if show.start_time > current_time:
       upcoming_shows.append({
         'venue_id' : show.venue_id,
         'venue_name' : Venue.query.get(show.venue_id).name,
@@ -614,6 +606,23 @@ def artist_upcoming_shows(shows):
         'start_time': format_datetime(str(show.start_time))
       })
   return upcoming_shows, len(upcoming_shows)
+
+def filter_term(search_field, search_term):
+  return search_field.ilike(f'%{search_term}%')
+
+def form_data_cleanser(form_data):
+  data = {}
+
+  for key in form_data:
+    if key in data:
+      inner_values = []
+      inner_values.extend([data[key], form_data[key]])
+      data[key] = inner_values
+    else:
+      data[key] = form_data[key]
+
+  return form_data
+
 
 
 #----------------------------------------------------------------------------#
