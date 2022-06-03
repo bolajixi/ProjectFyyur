@@ -8,7 +8,6 @@ from audioop import add
 from datetime import datetime
 from distutils.command.clean import clean
 from logging import FileHandler, Formatter
-from operator import itemgetter
 
 import babel
 import dateutil.parser
@@ -71,29 +70,25 @@ def venues():
     city_state.add((venue.city, venue.state))
 
   city_state = list(city_state)
-  city_state.sort(key=itemgetter(1,0))  
+  city_state.sort(key=lambda tup: tup[1]) # Sort by state code
 
-  for location in city_state:
+  # Get venue per region
+  for pairing in city_state:
     venue_list = []
 
     for venue in venues:
-      if (venue.city == location[0]) and (venue.state == location[1]):
+      venue_city, venue_state = pairing
+      if (venue.city == venue_city) and (venue.state == venue_state):
         num_upcoming_shows = 0 
-        venue_shows = Show.query.filter_by(venue_id=venue.id).all()
 
-        for show in venue_shows:
-          if show.start_time > current_time:
-            num_upcoming_shows += 1
+        for show in venue.shows:
+          if show.start_time > current_time: num_upcoming_shows += 1
 
-        venue_list.append({
-          "id": venue.id,
-          "name": venue.name,
-          "num_upcoming_shows": num_upcoming_shows
-        })
+        venue_list.append({ "id": venue.id, "name": venue.name,"num_upcoming_shows": num_upcoming_shows })
 
     data.append({
-      "city": location[0],
-      "state": location[1],
+      "city": venue_city,
+      "state": venue_state,
       "venues": venue_list
     })
 
@@ -319,7 +314,7 @@ def edit_artist_submission(artist_id):
   name = form.name.data.strip()
   city = form.city.data.strip()
   state = form.state.data
-  phone = form.phone.data
+  phone = form.phone.data.strip()
   genres = form.genres.data
   seeking_venue = form.seeking_venue.data
   seeking_description = form.seeking_description.data.strip()
@@ -393,7 +388,7 @@ def edit_venue_submission(venue_id):
   city = form.city.data.strip()
   state = form.state.data
   address = form.address.data.strip()
-  phone = form.phone.data
+  phone = form.phone.data.strip()
   genres = form.genres.data
   seeking_talent = form.seeking_talent.data
   seeking_description = form.seeking_description.data.strip()
@@ -447,7 +442,6 @@ def create_artist_form():
 @app.route('/artists/create', methods=['POST'])
 def create_artist_submission():
   form = ArtistForm()
-  clean_data = form_data_cleanser(form)
 
   name = form.name.data.strip()
   city = form.city.data.strip()
@@ -481,8 +475,9 @@ def create_artist_submission():
     db.session.add(artist)
     db.session.commit()
     flash(f"Artist '{request.form['name']}' was successfully listed!")
-  except:
+  except Exception as e:
     flash(f"An error occurred. Artist '{request.form['name']}' could not be listed.")
+    print(e)
     db.session.rollback()
   finally:
     db.session.close()
